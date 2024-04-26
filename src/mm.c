@@ -30,7 +30,7 @@ team_t team = {
     ""
 };
 
-#define DEBUG
+// #define DEBUG
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
 
@@ -45,6 +45,7 @@ team_t team = {
 #define FSIZE 16
 #define CHUNKSIZE ((1<<12) + (1<<5)) /* Extend heap by this amount (bytes) */
 #define NUM_LISTS 19
+#define FREE_BLOCK_MIN 24
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))
 #define MIN(x, y) ((x) < (y)? (x) : (y))
@@ -72,7 +73,7 @@ team_t team = {
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
 /* Given block ptr bp, compute address of next and previous blocks */
-#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp))))
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 /* Segregate list*/
@@ -85,18 +86,19 @@ team_t team = {
 
 
 static void *extend_heap(size_t words);
-// static void *best_fit(size_t asize);
-// static void *next_fit(size_t asize);
 static void *find_fit(size_t asize);
-static void place(void *bp, size_t asize);
+static void *place(void *bp, size_t asize);
 static void *coalesce(void *bp);
 static size_t get_index(size_t size);
 static void insert_block(void *bp);
 static void delete_block(void *bp);
-static void print_heap();
+static size_t adjust_alloc_size(size_t size);
 
 #ifdef DEBUG
+static void print_heap();
 static void show_block(void *bp);
+static void show_linklist();
+static void _check_heap();
 #endif
 
 static char *heap_listp;
@@ -108,26 +110,45 @@ static char *base_listp;
 static size_t get_index(size_t size){
     if (size <= 0)
         return NULL;
-    if (0 < size && size <= 16) return 0;
-    if (16 < size && size <= 32) return 1;
-    if (32 < size && size <= 64) return 2;
-    if (64 < size && size <= 128) return 3;
-    if (128 < size && size <= 256) return 4;
-    if (256 < size && size <= 512) return 5;
-    if (512 < size && size <= 1024) return 6;
-    if (1024 < size && size <= 2048) return 7;
-    if (2048 < size && size <= 4096) return 8;
-    if (4096 < size && size <= 8192) return 9;
-    if (8192 < size && size <= 16384) return 10;
-    if (16384 < size && size <= 32768) return 11;
-    if (32768 < size && size <= 65536) return 12;
-    if (65536 < size && size <= 131072) return 13;
-    if (131072 < size && size <= 262144) return 14;
-    if (262144 < size && size <= 524288) return 15;
-    if (524288 < size && size <= 1048576) return 16;
-    if (1048576 < size && size <= 2097152) return 17;
-    if (2097152 < size && size <= 4194304) return 18;
-    return NULL;
+    if (size <= 24) return 0;
+    if (size <= 32) return 1;
+    if (size <= 64) return 2;
+    if (size <= 80) return 3;
+    if (size <= 128) return 4;
+    if (size <= 256) return 5;
+    if (size <= 512) return 6;
+    if (size <= 1024) return 7;
+    if (size <= 2048) return 8;
+    if (size <= 4096) return 9;
+    if (size <= 8192) return 10;
+    if (size <= 16384) return 11;
+    if (size <= 32768) return 12;
+    if (size <= 65536) return 13;
+    if (size <= 131072) return 14;
+    if (size <= 262144) return 15;
+    if (size <= 524288) return 16;
+    if (size <= 1048576) return 17;
+    return 18;
+}
+
+static size_t adjust_alloc_size(size_t size){
+    // if (110 <= size && size <= 128) return 128;
+    // if (220 <= size && size <= 256) return 256;
+    // if (440 <= size && size <= 512) return 512;
+    // if (880 <= size && size <= 1024) return 1024;
+    // if (1920 <= size && size <= 2048) return 2048;
+    // if (3900 <= size && size <= 4096) return 4096;
+
+    if (size >= 72 && size <= 80) return 80;
+    if (size >= 112 && size < 128) return 128;
+    if (size >= 240 && size < 256) return 256;
+    if (size >= 448 && size < 512) return 512;
+    if (size >= 1000 && size < 1024) return 1024;
+    if (size >= 2000 && size < 2048) return 2048;
+    if (size >= 4072 && size < 4096) return 4096;
+    if (size >= 8100 && size < 8192) return 8192;
+    if (size >= 16300 && size < 16384) return 16384;
+    return size;
 }
 
 static void insert_block(void *bp){
@@ -135,8 +156,9 @@ static void insert_block(void *bp){
         printf("inserting blocks...\n");
         // show_block(bp);
     #endif
-    size_t size = GET_SIZE(HDRP(bp)) - WSIZE;
-    size_t index = get_index(size);
+    size_t asize = GET_SIZE(HDRP(bp));
+    assert(asize >= FREE_BLOCK_MIN);
+    size_t index = get_index(asize);
 
     void *head = base_listp + index * DSIZE;
     void *head_node = GET_NEXT(head);
@@ -150,10 +172,10 @@ static void insert_block(void *bp){
         SET_PREV(bp, NULL);
     }else{
         void* next = GET_NEXT(head_node);
-        SET_NEXT(head, bp);
+        SET_NEXT(head_node, bp);
         SET_NEXT(bp, next);
-        SET_PREV(bp, head);
-        SET_PREV(next, bp);
+        SET_PREV(bp, head_node);
+        if (next != NULL) SET_PREV(next, bp);
     }
 }
 
@@ -165,8 +187,8 @@ static void delete_block(void *bp){
     printf("deleting blocks...\n");
     // show_block(bp);
     #endif
-    size_t size = GET_SIZE(HDRP(bp)) - WSIZE;
-    size_t index = get_index(size);
+    size_t asize = GET_SIZE(HDRP(bp));
+    size_t index = get_index(asize);
 
     void *prev = GET_PREV(bp);
     void *next = GET_NEXT(bp);
@@ -175,11 +197,12 @@ static void delete_block(void *bp){
 
     if (head_node == bp){
         SET_NEXT(head, next);
+        if (next != NULL) SET_PREV(next, NULL);
     }else{
-        // SET_NEXT(bp, NULL);
-        // SET_PREV(bp, NULL);
         if (prev != NULL) SET_NEXT(prev, next);
         if (next != NULL) SET_PREV(next, prev);
+        // SET_NEXT(bp, NULL);
+        // SET_PREV(bp, NULL);
     }
 }
 
@@ -187,19 +210,37 @@ static void *find_fit(size_t asize){
     #ifdef DEBUG
         printf("finding fitable block...\n");
     #endif
-    size_t size = asize - WSIZE;
-    size_t index = get_index(size);
-
-    void *cur = base_listp + index* DSIZE;
+    assert(asize > WSIZE);
+    size_t index = get_index(asize);
+    void *head = base_listp + index* DSIZE;
+    void *cur = GET_NEXT(head);
     void *bp = NULL;
     size_t minsize = __INT32_MAX__;
-    while (GET_NEXT(cur) != NULL)
+    while (cur != NULL)
     {
-        if (GET_SIZE(HDRP(cur)) <= minsize){
-            minsize = GET_SIZE(HDRP(cur));
+        size_t cur_size = GET_SIZE(HDRP(cur));
+        if (cur_size >= asize && cur_size <= minsize){
+            minsize = cur_size;
             bp = cur;
         }
         cur = GET_NEXT(cur);
+    }
+    if (bp == NULL){
+        for (size_t i = index + 1; i < NUM_LISTS; i++)
+        {
+            void *head = base_listp + i*DSIZE;
+            void *cur = GET_NEXT(head);
+            while (cur != NULL)
+            {
+                size_t cur_size = GET_SIZE(HDRP(cur));
+                if (cur_size >= asize && cur_size <= minsize){
+                    minsize = cur_size;
+                    bp = cur;
+                }
+                cur = GET_NEXT(cur);
+            }
+            if (bp != NULL) return bp;
+        }
     }
     return bp;
 }
@@ -210,7 +251,10 @@ static void *find_fit(size_t asize){
 int mm_init(void)
 {
     #ifdef DEBUG
-        printf("init mm...\n");
+        printf("************************************************************************\n");
+        printf("************************************************************************\n");
+        printf("************************************************************************\n");
+        printf("***  init mm...\n");
     #endif
     int initsize = NUM_LISTS * DSIZE + 4 * WSIZE;
     /* Create the initial empty heap */
@@ -246,46 +290,37 @@ static void *extend_heap(size_t words)
 
     size = MAX(
             ((words % 2) ? (words+1) * WSIZE : words * WSIZE), 
-            2 * WSIZE + 2 * DSIZE
+            FREE_BLOCK_MIN
             );
     
     if ((long)(bp = mem_sbrk(size)) == -1)
         return NULL;
-
+    assert((void *)bp + size <= (char *)mem_heap_hi() + 1);
     /* Initialize free block header/footer and the epilogue header */
     size_t prev_alloced = GET_PREV_ALLOC(HDRP(bp));
     PUT(HDRP(bp), PACK(size, prev_alloced | 0)); /* Free block header */
     PUT(FTRP(bp), PACK(size, prev_alloced | 0)); /* Free block footer */
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 0b11)); /* New epilogue header */
-    // insert_block(bp);
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 0b01)); /* New epilogue header */
+    // SET_PREV_FREE(HDRP(NEXT_BLKP(bp)));
 
     /* Coalesce if the previous block was free */
     return coalesce(bp);
 }
 
-static void place(void *bp, size_t asize)
+static void *place(void *bp, size_t asize)
 {
-    // size_t size = GET_SIZE(HDRP(bp));
-    
-    // if ((size - asize) >= (3 * DSIZE)) {
-    //     PUT(HDRP(bp),PACK(asize,1));
-    //     PUT(FTRP(bp),PACK(asize,1));
-    //     PUT(HDRP(NEXT_BLKP(bp)),PACK(size - asize,0));
-    //     PUT(FTRP(NEXT_BLKP(bp)),PACK(size - asize,0));
-    // } else {
-    //     PUT(HDRP(bp),PACK(size,1));
-    //     PUT(FTRP(bp),PACK(size,1));
-    // }
-    // pre_listp = bp;
+
     #ifdef DEBUG
         printf("placing...\n");
-        printf("the block for placing is blank? %d\n", GET_ALLOC(HDRP(bp)));
+        assert(NULL == GET_ALLOC(HDRP(bp)));
+        assert(GET_SIZE(HDRP(bp)) >= asize);
     #endif
+    void *new_bp = bp;
     size_t free_asize = GET_SIZE(HDRP(bp));
     size_t remain_size = free_asize - asize;
     delete_block(bp);
     // 如果剩余块大小小于最小块大小，则不分割
-    if (remain_size < 2 * DSIZE) {
+    if (remain_size < FREE_BLOCK_MIN) {
         // 不改变块大小，只改变分配标志位，从而规避产生不可回收的外部碎片
         SET_ALLOC(HDRP(bp));
 
@@ -299,14 +334,21 @@ static void place(void *bp, size_t asize)
     // 如果剩余块大小大于等于最小块大小，则分割，下一个块必为空闲块
     else {
         // 设置当前块头部
-        PUT(HDRP(bp), PACK(asize, GET_PREV_ALLOC(HDRP(bp)) | 1));
-        // 设置剩余块的头部和脚部
+        void *next_p = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(remain_size, GET_PREV_ALLOC(HDRP(bp)) | 0));
+        PUT(FTRP(bp), PACK(remain_size, GET_PREV_ALLOC(HDRP(bp)) | 0));
         // 次低位（上一个块为分配块）设置为1，最低位（当前块为分配块）设置为0
-        PUT(HDRP(NEXT_BLKP(bp)), PACK(remain_size, 0b10));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(remain_size, 0b10));
+        SET_PREV_ALLOC(HDRP(next_p));
+        // 设置分配块的头部和脚部
+        new_bp = NEXT_BLKP(bp);
+        PUT(HDRP(new_bp), PACK(asize, 0b01));
+        PUT(FTRP(new_bp), PACK(asize, 0b01));
+        // PUT(HDRP(NEXT_BLKP(bp)), PACK(remain_size, 0b10));
+        // PUT(FTRP(NEXT_BLKP(bp)), PACK(remain_size, 0b10));
         // 将下一个块插入空闲链表
-        insert_block(NEXT_BLKP(bp));
+        insert_block(bp);
     }
+    return new_bp;
 }
 
 /*
@@ -315,30 +357,28 @@ static void place(void *bp, size_t asize)
 void mm_free(void *bp)
 {
     #ifdef DEBUG
-        printf("freeing...\n");
+        printf("*** freeing...\n");
+        if (mem_heapsize() == 854584 && GET_SIZE(HDRP(bp)) == 4080){
+            printf("1");
+        }
+        // if (mem_heapsize() == 4350208){
+        //     printf("1");
+        // }
+        _check_heap();
     #endif
     size_t size = GET_SIZE(HDRP(bp));
     size_t prev_alloc = GET_PREV_ALLOC(HDRP(bp));
     PUT(HDRP(bp), PACK(size, prev_alloc | 0));
     PUT(FTRP(bp), PACK(size, prev_alloc | 0));
-    coalesce(bp);
-    
+    coalesce(bp);   
 }
 
 static void *coalesce(void *bp)
 {
-    #ifdef DEBUG
-        // printf("coalescing...\n");
-    #endif
     size_t prev_alloc = GET_PREV_ALLOC(HDRP(bp));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
     size_t size = GET_SIZE(HDRP(bp));
 
-    // epilogue block
-    if (size == 0){
-        pre_listp = bp;
-        return;
-    }
     if (prev_alloc && next_alloc) { // Case 1 
         #ifdef DEBUG
             printf("coalescing case 1...\n");
@@ -347,8 +387,8 @@ static void *coalesce(void *bp)
         SET_PREV_FREE(HDRP(NEXT_BLKP(bp)));
     }
     else if (prev_alloc && !next_alloc) { /* Case 2 */
-    #ifdef DEBUG
-        printf("coalescing case 2...\n");
+        #ifdef DEBUG
+            printf("coalescing case 2...\n");
         #endif
         delete_block(NEXT_BLKP(bp));
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
@@ -358,11 +398,11 @@ static void *coalesce(void *bp)
 
     else if (!prev_alloc && next_alloc) { /* Case 3 */
         #ifdef DEBUG
-        printf("coalescing case 3...\n");
-        printf("the info of bp is %p\n", bp);
-        printf("prev: %p, size: %d\n", GET_PREV(bp), GET_SIZE(HDRP(GET_PREV(bp))));
-        // printf("the info of PREV_BLKP(PREV_BLKP(bp)) is %p\n", PREV_BLKP(PREV_BLKP(bp)));
-        // printf("the info of NEXT_BLKP(NEXT_BLKP(bp)) is %p\n", NEXT_BLKP(NEXT_BLKP(bp)));
+            printf("coalescing case 3...\n");
+            // printf("the info of bp is %p\n", bp);
+            // printf("prev: %p, size: %d\n", GET_PREV(bp), GET_SIZE(HDRP(GET_PREV(bp))));
+            // printf("the info of PREV_BLKP(PREV_BLKP(bp)) is %p\n", PREV_BLKP(PREV_BLKP(bp)));
+            // printf("the info of NEXT_BLKP(NEXT_BLKP(bp)) is %p\n", NEXT_BLKP(NEXT_BLKP(bp)));
         #endif 
         delete_block(PREV_BLKP(bp));
         SET_PREV_FREE(HDRP(NEXT_BLKP(bp)));
@@ -377,6 +417,7 @@ static void *coalesce(void *bp)
         #ifdef DEBUG
         printf("coalescing case 4...\n");
         #endif
+        
         delete_block(NEXT_BLKP(bp));
         delete_block(PREV_BLKP(bp));
 
@@ -402,221 +443,134 @@ static void *coalesce(void *bp)
 void *mm_malloc(size_t size)
 {
     #ifdef DEBUG
-        printf("mallocing blocks...\n");
+        printf("*** mallocing blocks...\n");
+        if ((1891880) <= (int)mem_heapsize()){ // 1891887
+            printf("%d\n", (int)mem_heapsize());
+        }
     #endif
     size_t asize; /* Adjusted block size */
     size_t extendsize; /* Amount to extend heap if no fit */
-    char *bp;
+    char *bp = NULL;
     
     /* Ignore spurious requests */
     if (size == 0)
         return NULL;
     
     /* Adjust block size to include overhead and alignment reqs. */
-    if (size <= DSIZE)
-        asize = 2*DSIZE;
+    if (size <= WSIZE + 2 * DSIZE)
+        asize = FREE_BLOCK_MIN;
     else // 只需要存header，不需要存footer
         asize = DSIZE * ((size + (WSIZE) + (DSIZE-1)) / DSIZE);
 
-    
+    asize = adjust_alloc_size(asize);
+
     /* Search the free list for a fit */
     if ((bp = find_fit(asize)) != NULL) {
-        place(bp, asize);
-        return bp;
+        bp = place(bp, asize);
+        // return bp;
     }else{
-        extend_heap(CHUNKSIZE/WSIZE);
-        if ((bp = find_fit(asize)) != NULL) {
-            place(bp, asize);
-            return bp;
-        }
+        extendsize = MAX(asize, CHUNKSIZE);
+        #ifdef DEBUG
+            if (((int)mem_heapsize() == 1891888 - 4128) || 0
+                // ((void *)bp + GET_SIZE(HDRP(bp)) <= (void *)mem_heap_hi() + 1)
+                ){
+                printf("1");   
+            }
+        #endif 
+        if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
+            return NULL;
+        assert((void *)bp + GET_SIZE(HDRP(bp)) <= (void *)mem_heap_hi() + 1);
+        bp = place(bp, asize);
     }
 
     /* No fit found. Get more memory and place the block */
-    extendsize = MAX(asize,CHUNKSIZE);
-    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
-        return NULL;
-    place(bp, asize);
-    print_heap();
     return bp;
 }
 
 void *mm_realloc(void *ptr, size_t size){
     #ifdef DEBUG
-        printf("reallocing blocks...\n");
+        printf("*** reallocing blocks...\n");
     #endif
-    size_t oldsize;
-    void* newptr;
-    // size 为 0，相当于 free
-    if (size == 0) {
-        free(ptr);
-        return 0;
-    }
-    // ptr 为 NULL，相当于 malloc
+
     if (ptr == NULL) {
-        return malloc(size);
+        return mm_malloc(size);
     }
-    newptr = malloc(size);
-    // realloc() 失败，原块保持不变
-    if (!newptr) {
+    if (size == 0) {
+        mm_free(ptr);
         return 0;
     }
-    // 拷贝原有数据，但是可能会产生截断
-    oldsize = GET_SIZE(HDRP(ptr));
-    oldsize = MIN(oldsize, size);
-    memcpy(newptr, ptr, oldsize);
-    // 释放原有块
-    free(ptr);
-    return newptr;
-}
-/*
-void *_mm_realloc(void *ptr, size_t size)
-{
-    if (ptr == NULL)
-       return mm_malloc(size);
-    if (size == 0) {
-       mm_free(ptr);
-       return NULL;
-    }
-    size_t adjust_size = ALIGN(size);
-    size_t adjust_asize = adjust_size + DSIZE;
-    size_t old_size = GET_SIZE(HDRP(ptr));
-    if(adjust_size < old_size)
-    {
+    size_t oldsize = GET_SIZE(HDRP(ptr));
+    size_t asize = MAX(
+        FREE_BLOCK_MIN,
+        DSIZE * ((size + (WSIZE) + (DSIZE-1)) / DSIZE)
+    );
+
+    if (asize <= oldsize){
         return ptr;
     }
-    if(!GET_ALLOC(NEXT_BLKP(ptr)))
-    {
-        void *next = NEXT_BLKP(ptr);
-        size_t next_size = GET_SIZE(HDRP(next));
-        size_t total_asize = old_size + next_size;
-        if(total_asize > adjust_asize)
-        {
-            void * new_next = (char *)ptr + adjust_asize;
-            PUT(HDRP(ptr),PACK(adjust_asize,1));
-            PUT(FTRP(ptr),PACK(adjust_asize,1));
-            PUT(HDRP(new_next), PACK(total_asize - adjust_asize, 0));
-            PUT(FTRP(new_next), PACK(total_asize - adjust_asize, 0));
-            if(next == pre_listp)
-            {
-                pre_listp = ptr;
-            }
+
+    void* newptr;
+
+    if (NEXT_BLKP(ptr) == mem_heap_hi() + 1){
+        size_t copySize;
+        newptr = mm_malloc(size);
+        if (newptr == NULL)
+        return NULL;
+        copySize = GET_SIZE(HDRP(newptr));
+        copySize = MIN(copySize, oldsize);
+        memmove(newptr, ptr, copySize - WSIZE);
+        mm_free(ptr);
+        return newptr; 
+    }
+
+    if (!GET_ALLOC(HDRP(NEXT_BLKP(ptr)))){
+        size_t next_size = GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+        size_t prev_alloc = GET_PREV_ALLOC(HDRP(ptr));
+        size_t total_size = oldsize + next_size;
+        void * next_free = NEXT_BLKP(ptr);
+        if (total_size - asize >= FREE_BLOCK_MIN){
+            delete_block(next_free);
+            PUT(HDRP(ptr), PACK(asize, prev_alloc | 1));
+            PUT(HDRP(NEXT_BLKP(ptr)), PACK(total_size - asize, 0b10));
+            PUT(FTRP(NEXT_BLKP(ptr)), PACK(total_size - asize, 0b10));
+            insert_block(NEXT_BLKP(ptr));   
+            // if (NEXT_BLKP(ptr) == pre_listp){
+            //     pre_listp = ptr;
+            // }
+            // place(ptr, adjust_size);
             return ptr;
         }
     }
-    // else if(!GET_ALLOC(PREV_BLKP(ptr)))
-    // {
-    //     void *prev = PREV_BLKP(ptr);
-    //     size_t pre_size = GET_SIZE(HDRP(prev));
-    //     size_t size = old_size + pre_size + WSIZE;
-    //     if(adjust_size <= size)
-    //     {
-    //         PUT(HDRP(prev), PACK(size, 0));
-    //         PUT(FTRP(ptr), PACK(size, 0));
-    //         if(ptr == pre_listp)
-    //         {
-    //             pre_listp = prev;
-    //         }
-    //         place(prev, adjust_size);
-    //         return prev;
-    //     }
-    // }
-    void *newptr;
+
+    
     size_t copySize;
     newptr = mm_malloc(size);
     if (newptr == NULL)
       return NULL;
-    size = GET_SIZE(HDRP(ptr));
     copySize = GET_SIZE(HDRP(newptr));
-    if (size < copySize)
-      copySize = size;
+    copySize = MIN(copySize, oldsize);
     memmove(newptr, ptr, copySize - WSIZE);
     mm_free(ptr);
     return newptr;
 }
-*/
 
-// static void *best_fit(size_t size){
-//     void *ptr = heap_listp;
-//     void *min = NULL;
-//     int residual = __INT32_MAX__;
-//     while(GET_SIZE(HDRP(ptr)) > 0)
-//     {
-//         if ((!GET_ALLOC(HDRP(ptr))) && (GET_SIZE(HDRP(ptr)) >= size)){ // free block && enough space
-//             size_t cur_size = GET_SIZE(HDRP(ptr));
-//             if (cur_size - size <= residual){
-//                 // TODO <= or <
-//                 residual = cur_size - size;
-//                 min = ptr;
-//             }
-//         }
-//         ptr = NEXT_BLKP(ptr);
-//     }
-//     return min;
-// }
-
-// static void *next_fit(size_t size) {
-//     void *bp;
-//     void *min = pre_listp;
-//     int extra = 50;
-//     for(; GET_SIZE(HDRP(min)) > 0; min = NEXT_BLKP(min)){
-//         if (!GET_ALLOC(HDRP(min)) && (size <= GET_SIZE(HDRP(min)))) {
-//             break;
-//         }
-//     }
-//     int count = 0;
-//     for (bp = pre_listp; GET_SIZE(HDRP(bp)) > 0 && count < extra; bp = NEXT_BLKP(bp)) {
-//         count++;
-//         if (!GET_ALLOC(HDRP(bp)) && (size <= GET_SIZE(HDRP(bp)))) {
-//             if(GET_SIZE(HDRP(min)) > GET_SIZE(HDRP(bp)))
-//             {
-//                 min = bp;
-//             }
-//         }
-//     }
-
-//     bp = min;
-
-//     if(!GET_ALLOC(HDRP(min)) && (size <= GET_SIZE(HDRP(min))))
-//     {
-//         pre_listp = bp;
-//         return bp;
-//     }
-
-//     for(min = heap_listp; GET_SIZE(HDRP(min)) > 0; min = NEXT_BLKP(min)){
-//         if (!GET_ALLOC(HDRP(min)) && (size <= GET_SIZE(HDRP(min)))) {
-//             break;
-//         }
-//     }
-
-//     count = 0;
-
-//     for (bp = pre_listp; GET_SIZE(HDRP(bp)) > 0 && count < extra; bp = NEXT_BLKP(bp)) {
-//         count++;
-//         if (!GET_ALLOC(HDRP(bp)) && (size <= GET_SIZE(HDRP(bp)))) {
-//             if(GET_SIZE(HDRP(min)) > GET_SIZE(HDRP(bp)))
-//             {
-//                 min = bp;
-//             }
-//         }
-//     }
-
-//     bp = min;
-
-//     if(!GET_ALLOC(HDRP(min)) && (size <= GET_SIZE(HDRP(min))))
-//     {
-//         pre_listp = bp;
-//         return bp;
-//     }
-    
-//     return NULL; /* No fit */
-// }
+#ifdef DEBUG
 
 static void show_block(void *bp){
     printf("==========================================\n");
     printf("bp is %p\n", bp);
     printf("size is %d\n", GET_SIZE(HDRP(bp)));
     printf("alloced? %d\n", GET_ALLOC(HDRP(bp)));
-    printf("prev_alloced? %d\n", GET_PREV_ALLOC(HDRP(bp)));
+    if (!GET_PREV_ALLOC(HDRP(bp))){
+        printf("prev block is %p\n", PREV_BLKP(bp));
+    }else{
+        printf("prev block is alloced\n");
+    }
+    printf("next block is %p\n", NEXT_BLKP(bp));
+    if (!GET_ALLOC(HDRP(bp))){
+        printf("next free: %p\n", GET_NEXT(bp));
+        printf("prev free: %p\n", GET_PREV(bp));
+    }
     printf("==========================================\n");
 }
 
@@ -632,13 +586,38 @@ static void print_heap(){
     printf("==========================================\n");
 }
 
-static void print_linklist(){
+static void show_linklist(){
     for (int i = 0; i < NUM_LISTS; i++) {
-    
-        printf("List %d:\n", i);
-        // while (current != NULL) {
-            // printf("    Block at %p, size %zu\n", (void *)current, current->size);
-            // current = current->next;
-        // }
+        void *head = base_listp + i * DSIZE;
+        void *current = GET_NEXT(head);
+        if (current == NULL) continue;  
+        printf("list %d: ", i);
+        while (current != NULL) {
+            unsigned long val = (unsigned long)current;
+            printf("%d(%x) -> ", GET_SIZE(HDRP(current)), (val & 0xffff));
+            current = GET_NEXT(current);
+        }
+        printf("\n");
     }
 }
+
+static void show_basic(){
+    printf("current heap_size: %d\n", (int)mem_heapsize());
+    printf("current heap_hi: %p\n", (void *)mem_heap_hi() + 1);
+}
+
+static void _check_heap(){
+    void *head = heap_listp;
+    while (head != mem_heap_hi() + 1)
+    {
+        if (GET_SIZE(HDRP(head)) == 0){
+            printf("1");
+        }
+        if (!GET_ALLOC(HDRP(head)) && (GET_SIZE(HDRP(head)) != GET_SIZE(FTRP(head)))){
+            printf("error: %p\n", head);
+        }
+        head = NEXT_BLKP(head);
+    }
+}
+
+#endif 
